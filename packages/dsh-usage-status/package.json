@@ -1,0 +1,15 @@
+{
+  "name": "dsh-usage-status",
+  "version": "0.1.0",
+  "private": true,
+  "description": "dsh web host plugin: serves GET /usage-status with DeepSeek balance (official API) and optional platform usage amount/cost, gated by the user-toggleable usage-footer settings section",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "license": "MIT"
+}

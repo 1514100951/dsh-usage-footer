@@ -9,6 +9,9 @@ DSH Web 界面「用量与费用」插件（独立项目），包含两个包：
 
 ## 功能
 
+<img width="486" height="725" alt="84b8dcee67b5baaabca23bc1b62f87bf" src="https://github.com/user-attachments/assets/cec5e700-4afd-4d91-b42d-c1826e5f46cb" />
+
+
 - **悬浮按钮（右下角）**：悬浮圆钮（金币徽标），外环与角点颜色指示当前时段——绿=空闲、琥珀=高峰（呼吸动画）、红=余额查询失败
 - **悬停弹窗**（120ms 延迟出现、260ms 宽容关闭；点击可钉住，点外部/Esc 关闭；自按钮左上方展开）：
   - **账户余额**：官方 API `GET https://api.deepseek.com/user/balance`（每 60 秒刷新，点击"更新"手动刷新），含充值/赠送拆分

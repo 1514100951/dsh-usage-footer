@@ -14,6 +14,11 @@
  *       isAvailable, currency,
  *       totalBalance, grantedBalance, toppedUpBalance
  *     } | null,
+ *     todaySpend: {                      // balance-snapshot delta (official
+ *       amount, currency, day,           // billing口径): day-start snapshot −
+ *       baselineAt                       // current balance, with recharge/grant
+ *     } | null,                          // corrections; snapshot persisted in
+ *                                        // $DSH_HOME/<baseline file>
  *     usageAmount: <raw data> | null,    // platform endpoint, only when
  *     usageCost:   <raw data> | null,    // DEEPSEEK_PLATFORM_TOKEN is set
  *     errors: string[]
@@ -29,6 +34,9 @@
  */
 
 import z from "@deepseek-ai/schemastery";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { homedir } from "node:os";
 
 const ROUTE_PATH = "/usage-status";
 const CACHE_TTL_MS = 30_000;
@@ -42,6 +50,74 @@ const USAGE_SETTINGS_NS = "usage-footer";
 const USAGE_SETTINGS_SCHEMA = z.object({
   enabled: z.boolean().default(true)
 });
+
+/** Baseline snapshot file name under $DSH_HOME (day-start balance). */
+const BASELINE_FILENAME = "usage-footer-balance-baseline.json";
+
+/** Beijing date key (UTC+8, no DST) for the daily baseline rollover. */
+function beijingDateKey(ts = Date.now()) {
+  return new Date(ts + 8 * 3600e3).toISOString().slice(0, 10);
+}
+
+function loadBaseline(path) {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function saveBaseline(path, value) {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify(value, null, 2));
+  } catch {
+    /* best-effort persistence; the in-memory baseline still works */
+  }
+}
+
+function parseMoney(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * Today's billed spend from a day-start balance snapshot.
+ *
+ * net = snapshot.total − current.total
+ *     + (current.toppedUp − snapshot.toppedUp)
+ *     + (current.granted − snapshot.granted)
+ *
+ * The two correction terms cancel out recharges and grant changes, so the
+ * result is the money actually consumed since the snapshot. On the first
+ * query of a new Beijing day the snapshot is (re)written and the amount is 0;
+ * a vanished or stale snapshot is re-anchored the same way.
+ */
+function computeTodaySpend(baselinePath, info, now) {
+  const day = beijingDateKey(now);
+  const current = {
+    total: parseMoney(info.total_balance),
+    toppedUp: parseMoney(info.topped_up_balance),
+    granted: parseMoney(info.granted_balance)
+  };
+  const baseline = loadBaseline(baselinePath);
+  if (baseline === null || baseline.date !== day) {
+    const next = {
+      date: day,
+      at: new Date(now).toISOString(),
+      total: current.total,
+      toppedUp: current.toppedUp,
+      granted: current.granted
+    };
+    saveBaseline(baselinePath, next);
+    return { amount: 0, currency: typeof info.currency === "string" ? info.currency : null, day, baselineAt: next.at };
+  }
+  const net = baseline.total - current.total
+    + (current.toppedUp - baseline.toppedUp)
+    + (current.granted - baseline.granted);
+  const amount = Math.max(0, Math.round(net * 100) / 100);
+  return { amount, currency: typeof info.currency === "string" ? info.currency : null, day, baselineAt: baseline.at };
+}
 
 /** Accept only loopback peers: this route answers account data, never LAN peers. */
 function isLoopback(address) {
@@ -78,12 +154,13 @@ function sendJson(res, code, value) {
 }
 
 /** Query DeepSeek for the account figures this route publishes. */
-async function queryUsageStatus(credentials) {
+async function queryUsageStatus(credentials, baselinePath) {
   const now = new Date();
   const result = {
     month: now.getMonth() + 1,
     year: now.getFullYear(),
     balance: null,
+    todaySpend: null,
     usageAmount: null,
     usageCost: null,
     errors: []
@@ -104,6 +181,9 @@ async function queryUsageStatus(credentials) {
         grantedBalance: String(info.granted_balance ?? ""),
         toppedUpBalance: String(info.topped_up_balance ?? "")
       };
+      if (baselinePath !== undefined) {
+        result.todaySpend = computeTodaySpend(baselinePath, info, now.getTime());
+      }
     } else {
       result.errors.push("balance-unavailable");
     }
@@ -132,6 +212,8 @@ async function queryUsageStatus(credentials) {
 
 export const inject = ["credentials", "webServer"];
 
+export { computeTodaySpend };
+
 export function apply(ctx) {
   const cache = new Map(); // key -> { at, value }
   // Settings registration rides the optional-settings seam: absent settings
@@ -139,6 +221,12 @@ export function apply(ctx) {
   let usageScope;
   ctx.inject(["settings"], (settingsCtx) => {
     usageScope = settingsCtx.settings.register(USAGE_SETTINGS_NS, USAGE_SETTINGS_SCHEMA);
+  });
+  // Day-start balance snapshot path: $DSH_HOME/… when the home-path service
+  // exists, else ~/.dsh/… as a fallback.
+  let baselinePath = join(homedir(), ".dsh", BASELINE_FILENAME);
+  ctx.inject(["dshHomePath"], (homeCtx) => {
+    baselinePath = homeCtx.dshHomePath(BASELINE_FILENAME);
   });
   ctx.effect(() => {
     const disposeRoute = ctx.webServer.register({
@@ -165,7 +253,7 @@ export function apply(ctx) {
           sendJson(res, 200, cached.value);
           return;
         }
-        const value = await queryUsageStatus(ctx.credentials);
+        const value = await queryUsageStatus(ctx.credentials, baselinePath);
         cache.set("status", { at: Date.now(), value });
         sendJson(res, 200, value);
       }

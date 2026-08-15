@@ -75,6 +75,8 @@ const USAGE_SETTINGS_SCHEMA = z.object({
 const BASELINE_FILENAME = "usage-footer-balance-baseline.json";
 /** Local ledger file name under $DSH_HOME/storages. */
 const LEDGER_FILENAME = "usage-footer-ledger.json";
+/** Sync baseline file name under $DSH_HOME/storages. */
+const SYNC_FILENAME = "usage-footer-sync-baseline.json";
 
 /** Beijing date key (UTC+8, no DST) for the daily baseline rollover. */
 function beijingDateKey(ts = Date.now()) {
@@ -96,6 +98,27 @@ function saveBaseline(path, value) {
   } catch {
     /* best-effort persistence; the in-memory baseline still works */
   }
+}
+
+function loadSyncBaseline(path) {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function saveSyncBaseline(path, value) {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify(value, null, 2));
+  } catch {
+    /* best-effort persistence */
+  }
+}
+
+function round6(value) {
+  return Math.round(value * 1e6) / 1e6;
 }
 
 function parseMoney(value) {
@@ -164,8 +187,38 @@ function sendJson(res, code, value) {
   res.end(body);
 }
 
+/** 本地与官方“自同步起点以来的增量”对比。 */
+function computeComparison(local, official, syncBaseline) {
+  const now = Date.now();
+  const currentDay = dayKey(now);
+  const currentMonth = monthKey(now);
+  const monthBase = syncBaseline !== null && syncBaseline.monthKey === currentMonth ? syncBaseline : null;
+  const todayBase = syncBaseline !== null && syncBaseline.today === currentDay ? syncBaseline : null;
+  const monthLocal = (local.month.cost ?? 0) - (monthBase?.localMonthCost ?? 0);
+  const monthOfficial = official.monthCost - (monthBase?.officialMonthCost ?? 0);
+  const todayLocal = (local.today.cost ?? 0) - (todayBase?.localTodayCost ?? 0);
+  const todayOfficial = official.todayCost - (todayBase?.officialTodayCost ?? 0);
+  return {
+    month: {
+      localCost: round6(monthLocal),
+      officialCost: round6(monthOfficial),
+      diff: round6(monthLocal - monthOfficial),
+      diffPercent: monthOfficial > 0 ? ((monthLocal - monthOfficial) / monthOfficial) * 100 : null,
+      currency: official.currency
+    },
+    today: {
+      localCost: round6(todayLocal),
+      officialCost: round6(todayOfficial),
+      diff: round6(todayLocal - todayOfficial),
+      diffPercent: todayOfficial > 0 ? ((todayLocal - todayOfficial) / todayOfficial) * 100 : null,
+      currency: official.currency
+    },
+    syncedAt: syncBaseline?.syncedAt ?? null
+  };
+}
+
 /** Query DeepSeek for the account figures this route publishes. */
-async function queryUsageStatus(ctx, baselinePath, ledger) {
+async function queryUsageStatus(ctx, baselinePath, ledger, syncBaseline) {
   const now = new Date();
   const result = {
     month: now.getMonth() + 1,
@@ -175,6 +228,7 @@ async function queryUsageStatus(ctx, baselinePath, ledger) {
     local: ledger.snapshot(),
     official: null,
     comparison: null,
+    sync: syncBaseline ?? null,
     usageAmount: null,
     usageCost: null,
     errors: []
@@ -208,24 +262,7 @@ async function queryUsageStatus(ctx, baselinePath, ledger) {
     const official = await fetchOfficialUsage(platformToken.value, now);
     if (official !== null) {
       result.official = official;
-      const monthLocal = result.local.month.cost ?? 0;
-      const todayLocal = result.local.today.cost ?? 0;
-      result.comparison = {
-        month: {
-          localCost: monthLocal,
-          officialCost: official.monthCost,
-          diff: monthLocal - official.monthCost,
-          diffPercent: official.monthCost > 0 ? ((monthLocal - official.monthCost) / official.monthCost) * 100 : null,
-          currency: official.currency
-        },
-        today: {
-          localCost: todayLocal,
-          officialCost: official.todayCost,
-          diff: todayLocal - official.todayCost,
-          diffPercent: official.todayCost > 0 ? ((todayLocal - official.todayCost) / official.todayCost) * 100 : null,
-          currency: official.currency
-        }
-      };
+      result.comparison = computeComparison(result.local, official, syncBaseline);
     } else {
       result.errors.push("official-usage-unavailable");
     }
@@ -234,9 +271,34 @@ async function queryUsageStatus(ctx, baselinePath, ledger) {
   return result;
 }
 
+/** 创建/更新“本地 vs 官方”同步起点。 */
+async function createSyncBaseline(ctx, ledger, syncPath) {
+  const platformToken = await ctx.credentials.resolve(PLATFORM_TOKEN_REF).catch(() => undefined);
+  if (!platformToken?.value) return { ok: false, status: 400, error: "no-platform-token" };
+  const now = new Date();
+  const official = await fetchOfficialUsage(platformToken.value, now);
+  if (official === null) return { ok: false, status: 502, error: "official-unavailable" };
+  const local = ledger.snapshot();
+  const baseline = {
+    syncedAt: now.toISOString(),
+    monthKey: monthKey(now.getTime()),
+    today: dayKey(now.getTime()),
+    localMonthCost: local.month.cost ?? 0,
+    localMonthTokens: (local.month.inputTokens ?? 0) + (local.month.cacheReadTokens ?? 0) + (local.month.cacheWriteTokens ?? 0) + (local.month.outputTokens ?? 0),
+    localTodayCost: local.today.cost ?? 0,
+    localTodayTokens: (local.today.inputTokens ?? 0) + (local.today.cacheReadTokens ?? 0) + (local.today.cacheWriteTokens ?? 0) + (local.today.outputTokens ?? 0),
+    officialMonthCost: official.monthCost,
+    officialMonthTokens: official.monthTokens,
+    officialTodayCost: official.todayCost,
+    officialTodayTokens: official.todayTokens
+  };
+  saveSyncBaseline(syncPath, baseline);
+  return { ok: true, status: 200, baseline };
+}
+
 export const inject = ["credentials", "webServer"];
 
-export { computeTodaySpend, UsageLedger, costOf, priceAt, dayKey, monthKey, zeroCounts, addCounts };
+export { computeTodaySpend, UsageLedger, costOf, priceAt, dayKey, monthKey, zeroCounts, addCounts, computeComparison, createSyncBaseline };
 
 export function apply(ctx) {
   const cache = new Map(); // key -> { at, value }
@@ -250,11 +312,15 @@ export function apply(ctx) {
   // exists, else ~/.dsh/… as a fallback.
   let baselinePath = join(homedir(), ".dsh", BASELINE_FILENAME);
   let ledgerPath = join(homedir(), ".dsh", "storages", LEDGER_FILENAME);
+  let syncPath = join(homedir(), ".dsh", "storages", SYNC_FILENAME);
   const ledger = new UsageLedger(ledgerPath);
+  let syncBaseline = loadSyncBaseline(syncPath);
   ctx.inject(["dshHomePath"], (homeCtx) => {
     baselinePath = homeCtx.dshHomePath(BASELINE_FILENAME);
     ledgerPath = homeCtx.dshHomePath("storages", LEDGER_FILENAME);
+    syncPath = homeCtx.dshHomePath("storages", SYNC_FILENAME);
     ledger.setPath(ledgerPath);
+    syncBaseline = loadSyncBaseline(syncPath);
   });
   const headersBySession = new Map();
 
@@ -299,7 +365,16 @@ export function apply(ctx) {
   });
 
   ctx.effect(() => {
-    const disposeRoute = ctx.webServer.register({
+    const loopbackGuard = (req, res, next) => {
+      const remote = req.socket?.remoteAddress ?? "";
+      if (!isLoopback(remote)) {
+        res.writeHead(403);
+        res.end();
+        return false;
+      }
+      return next();
+    };
+    const disposeStatusRoute = ctx.webServer.register({
       kind: "exact",
       path: ROUTE_PATH,
       handler: async (req, res) => {
@@ -308,30 +383,48 @@ export function apply(ctx) {
           res.end();
           return;
         }
-        const remote = req.socket?.remoteAddress ?? "";
-        if (!isLoopback(remote)) {
-          res.writeHead(403);
+        await loopbackGuard(req, res, async () => {
+          if (usageScope !== undefined && usageScope.get().enabled === false) {
+            sendJson(res, 200, { disabled: true });
+            return;
+          }
+          const cached = cache.get("status");
+          if (cached !== undefined && Date.now() - cached.at < CACHE_TTL_MS) {
+            sendJson(res, 200, cached.value);
+            return;
+          }
+          const value = await queryUsageStatus(ctx, baselinePath, ledger, syncBaseline);
+          cache.set("status", { at: Date.now(), value });
+          sendJson(res, 200, value);
+        });
+      }
+    });
+    const disposeSyncRoute = ctx.webServer.register({
+      kind: "exact",
+      path: "/usage-status/sync",
+      handler: async (req, res) => {
+        if (req.method !== "POST") {
+          res.writeHead(405);
           res.end();
           return;
         }
-        if (usageScope !== undefined && usageScope.get().enabled === false) {
-          sendJson(res, 200, { disabled: true });
-          return;
-        }
-        const cached = cache.get("status");
-        if (cached !== undefined && Date.now() - cached.at < CACHE_TTL_MS) {
-          sendJson(res, 200, cached.value);
-          return;
-        }
-        const value = await queryUsageStatus(ctx, baselinePath, ledger);
-        cache.set("status", { at: Date.now(), value });
-        sendJson(res, 200, value);
+        await loopbackGuard(req, res, async () => {
+          const result = await createSyncBaseline(ctx, ledger, syncPath);
+          if (!result.ok) {
+            sendJson(res, result.status, { ok: false, error: result.error });
+            return;
+          }
+          syncBaseline = result.baseline;
+          cache.clear();
+          sendJson(res, 200, { ok: true, baseline: result.baseline });
+        });
       }
     });
     return () => {
-      disposeRoute();
+      disposeStatusRoute();
+      disposeSyncRoute();
       cache.clear();
       ledger.dispose();
     };
-  }, "usage-status: /usage-status route");
+  }, "usage-status: /usage-status routes");
 }

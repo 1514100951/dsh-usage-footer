@@ -14,13 +14,24 @@
  *       isAvailable, currency,
  *       totalBalance, grantedBalance, toppedUpBalance
  *     } | null,
- *     todaySpend: {                      // balance-snapshot delta (official
- *       amount, currency, day,           // billing口径): day-start snapshot −
- *       baselineAt                       // current balance, with recharge/grant
- *     } | null,                          // corrections; snapshot persisted in
+ *     todaySpend: {                      // balance-snapshot delta (estimate)
+ *       amount, currency, day,
+ *       baselineAt, source: "estimate"
+ *     } | null,                          // snapshot persisted in
  *                                        // $DSH_HOME/<baseline file>
- *     usageAmount: <raw data> | null,    // platform endpoint, only when
- *     usageCost:   <raw data> | null,    // DEEPSEEK_PLATFORM_TOKEN is set
+ *     local: {                           // local ledger priced with official table
+ *       totals, today, month, byModel
+ *     },
+ *     official: {                        // platform.deepseek.com, only when
+ *       monthCost, monthTokens,          // DEEPSEEK_PLATFORM_TOKEN is set
+ *       todayCost, todayTokens, currency
+ *     } | null,
+ *     comparison: {                      // local vs official (only when official exists)
+ *       month: { localCost, officialCost, diff, diffPercent, currency },
+ *       today: { localCost, officialCost, diff, diffPercent, currency }
+ *     } | null,
+ *     usageAmount: <raw data> | null,    // kept for backward compatibility
+ *     usageCost:   <raw data> | null,
  *     errors: string[]
  *   }
  *
@@ -28,6 +39,12 @@
  * DEEPSEEK_PLATFORM_TOKEN → private platform endpoints (platform.deepseek.com
  *                         /api/v0/usage/{amount,cost}), browser-session token
  *                         required; an API key is rejected there (code 40003).
+ *
+ * The local ledger subscribes to DSH `session/event` and prices every
+ * `assistant/message` that carries usage with the official DeepSeek price
+ * table (including the 2026-08-17 peak/off-peak policy). It is the primary
+ * source for "token/金额消耗" and is designed to stay available after the
+ * user can no longer log into the DeepSeek platform.
  *
  * Responses are cached for 30s so the browser footer polling stays cheap, and
  * the route refuses any non-loopback peer (the deployment binds 127.0.0.1).
@@ -37,6 +54,9 @@ import z from "@deepseek-ai/schemastery";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
+import { UsageLedger } from "./ledger.js";
+import { fetchOfficialUsage } from "./platform.js";
+import { costOf, priceAt, dayKey, monthKey, zeroCounts, addCounts } from "./pricing.js";
 
 const ROUTE_PATH = "/usage-status";
 const CACHE_TTL_MS = 30_000;
@@ -53,6 +73,8 @@ const USAGE_SETTINGS_SCHEMA = z.object({
 
 /** Baseline snapshot file name under $DSH_HOME (day-start balance). */
 const BASELINE_FILENAME = "usage-footer-balance-baseline.json";
+/** Local ledger file name under $DSH_HOME/storages. */
+const LEDGER_FILENAME = "usage-footer-ledger.json";
 
 /** Beijing date key (UTC+8, no DST) for the daily baseline rollover. */
 function beijingDateKey(ts = Date.now()) {
@@ -82,41 +104,30 @@ function parseMoney(value) {
 }
 
 /**
- * Today's billed spend from a day-start balance snapshot.
+ * Today's spend estimate from a day-start balance snapshot.
  *
- * net = snapshot.total − current.total
- *     + (current.toppedUp − snapshot.toppedUp)
- *     + (current.granted − snapshot.granted)
- *
- * The two correction terms cancel out recharges and grant changes, so the
- * result is the money actually consumed since the snapshot. On the first
- * query of a new Beijing day the snapshot is (re)written and the amount is 0;
- * a vanished or stale snapshot is re-anchored the same way.
+ * 注意：DeepSeek 的 `total_balance = topped_up_balance + granted_balance`，
+ * 之前用“余额差 + 充值/赠送修正”会把消费完全抵消成 0。这里改为简单的
+ * `max(0, 当天期初余额 − 当前余额)`，只作为没有平台 token 时的估算值；
+ * 精确金额请以本地账本（`local`）或平台官方数据（`official`）为准。
  */
 function computeTodaySpend(baselinePath, info, now) {
   const day = beijingDateKey(now);
-  const current = {
-    total: parseMoney(info.total_balance),
-    toppedUp: parseMoney(info.topped_up_balance),
-    granted: parseMoney(info.granted_balance)
-  };
+  const currentTotal = parseMoney(info.total_balance);
   const baseline = loadBaseline(baselinePath);
   if (baseline === null || baseline.date !== day) {
     const next = {
       date: day,
       at: new Date(now).toISOString(),
-      total: current.total,
-      toppedUp: current.toppedUp,
-      granted: current.granted
+      total: currentTotal,
+      toppedUp: parseMoney(info.topped_up_balance),
+      granted: parseMoney(info.granted_balance)
     };
     saveBaseline(baselinePath, next);
-    return { amount: 0, currency: typeof info.currency === "string" ? info.currency : null, day, baselineAt: next.at };
+    return { amount: 0, currency: typeof info.currency === "string" ? info.currency : null, day, baselineAt: next.at, source: "estimate" };
   }
-  const net = baseline.total - current.total
-    + (current.toppedUp - baseline.toppedUp)
-    + (current.granted - baseline.granted);
-  const amount = Math.max(0, Math.round(net * 100) / 100);
-  return { amount, currency: typeof info.currency === "string" ? info.currency : null, day, baselineAt: baseline.at };
+  const amount = Math.max(0, Math.round((baseline.total - currentTotal) * 100) / 100);
+  return { amount, currency: typeof info.currency === "string" ? info.currency : null, day, baselineAt: baseline.at, source: "estimate" };
 }
 
 /** Accept only loopback peers: this route answers account data, never LAN peers. */
@@ -154,19 +165,22 @@ function sendJson(res, code, value) {
 }
 
 /** Query DeepSeek for the account figures this route publishes. */
-async function queryUsageStatus(credentials, baselinePath) {
+async function queryUsageStatus(ctx, baselinePath, ledger) {
   const now = new Date();
   const result = {
     month: now.getMonth() + 1,
     year: now.getFullYear(),
     balance: null,
     todaySpend: null,
+    local: ledger.snapshot(),
+    official: null,
+    comparison: null,
     usageAmount: null,
     usageCost: null,
     errors: []
   };
 
-  const apiKey = await credentials.resolve(API_KEY_REF).catch(() => undefined);
+  const apiKey = await ctx.credentials.resolve(API_KEY_REF).catch(() => undefined);
   if (apiKey?.value) {
     const balance = await fetchJson("https://api.deepseek.com/user/balance", {
       authorization: `Bearer ${apiKey.value}`,
@@ -189,22 +203,32 @@ async function queryUsageStatus(credentials, baselinePath) {
     }
   }
 
-  const platformToken = await credentials.resolve(PLATFORM_TOKEN_REF).catch(() => undefined);
+  const platformToken = await ctx.credentials.resolve(PLATFORM_TOKEN_REF).catch(() => undefined);
   if (platformToken?.value) {
-    const month = now.getMonth() + 1;
-    const year = now.getFullYear();
-    const headers = {
-      authorization: `Bearer ${platformToken.value}`,
-      accept: "application/json"
-    };
-    const [amount, cost] = await Promise.all([
-      fetchJson(`https://platform.deepseek.com/api/v0/usage/amount?month=${month}&year=${year}`, headers, FETCH_TIMEOUT_MS),
-      fetchJson(`https://platform.deepseek.com/api/v0/usage/cost?month=${month}&year=${year}`, headers, FETCH_TIMEOUT_MS)
-    ]);
-    if (amount && !amount.failed && amount.code === 0) result.usageAmount = amount.data ?? amount;
-    else result.errors.push("usage-amount-unavailable");
-    if (cost && !cost.failed && cost.code === 0) result.usageCost = cost.data ?? cost;
-    else result.errors.push("usage-cost-unavailable");
+    const official = await fetchOfficialUsage(platformToken.value, now);
+    if (official !== null) {
+      result.official = official;
+      const monthLocal = result.local.month.cost ?? 0;
+      const todayLocal = result.local.today.cost ?? 0;
+      result.comparison = {
+        month: {
+          localCost: monthLocal,
+          officialCost: official.monthCost,
+          diff: monthLocal - official.monthCost,
+          diffPercent: official.monthCost > 0 ? ((monthLocal - official.monthCost) / official.monthCost) * 100 : null,
+          currency: official.currency
+        },
+        today: {
+          localCost: todayLocal,
+          officialCost: official.todayCost,
+          diff: todayLocal - official.todayCost,
+          diffPercent: official.todayCost > 0 ? ((todayLocal - official.todayCost) / official.todayCost) * 100 : null,
+          currency: official.currency
+        }
+      };
+    } else {
+      result.errors.push("official-usage-unavailable");
+    }
   }
 
   return result;
@@ -212,7 +236,7 @@ async function queryUsageStatus(credentials, baselinePath) {
 
 export const inject = ["credentials", "webServer"];
 
-export { computeTodaySpend };
+export { computeTodaySpend, UsageLedger, costOf, priceAt, dayKey, monthKey, zeroCounts, addCounts };
 
 export function apply(ctx) {
   const cache = new Map(); // key -> { at, value }
@@ -225,9 +249,55 @@ export function apply(ctx) {
   // Day-start balance snapshot path: $DSH_HOME/… when the home-path service
   // exists, else ~/.dsh/… as a fallback.
   let baselinePath = join(homedir(), ".dsh", BASELINE_FILENAME);
+  let ledgerPath = join(homedir(), ".dsh", "storages", LEDGER_FILENAME);
+  const ledger = new UsageLedger(ledgerPath);
   ctx.inject(["dshHomePath"], (homeCtx) => {
     baselinePath = homeCtx.dshHomePath(BASELINE_FILENAME);
+    ledgerPath = homeCtx.dshHomePath("storages", LEDGER_FILENAME);
+    ledger.setPath(ledgerPath);
   });
+  const headersBySession = new Map();
+
+  // 实时记账：订阅 DSH 会话事件，对每条带 usage 的 assistant/message 计价。
+  ctx.on("session/event", (session, event) => {
+    try {
+      if (usageScope !== undefined && usageScope.get().enabled === false) return;
+      if (event?.type === "request/header" && event.data?.header?.config) {
+        const header = event.data.header.config;
+        if (typeof header.provider === "string" && typeof header.model === "string") {
+          headersBySession.set(session.id, { provider: header.provider, model: header.model });
+        }
+        return;
+      }
+      if (event?.type !== "assistant/message") return;
+      const data = event.data;
+      if (data?.usage === void 0 || data.usage === null) return;
+      const usage = data.usage;
+      if (typeof usage.outputTokens !== "number" && typeof usage.inputTokens !== "number") return;
+      const source = data.message?.source;
+      const header = headersBySession.get(session.id);
+      const provider = typeof source?.provider === "string" ? source.provider : header?.provider ?? "";
+      const model = typeof source?.model === "string" ? source.model : header?.model ?? "unknown";
+      const unit = priceAt(model, event.time ?? Date.now());
+      const sample = costOf(usage, unit);
+      ledger.record({
+        sessionId: session.id,
+        messageId: String(data.message?.id ?? `seq-${event.seq}`),
+        time: event.time ?? Date.now(),
+        provider,
+        model,
+        inputTokens: sample.inputTokens,
+        cacheReadTokens: sample.cacheReadTokens,
+        cacheWriteTokens: sample.cacheWriteTokens,
+        outputTokens: sample.outputTokens,
+        cost: sample.cost,
+        costUsd: sample.costUsd
+      });
+    } catch (error) {
+      ctx.logger?.warn?.(`[dsh-usage-footer] ledger record failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
+
   ctx.effect(() => {
     const disposeRoute = ctx.webServer.register({
       kind: "exact",
@@ -253,7 +323,7 @@ export function apply(ctx) {
           sendJson(res, 200, cached.value);
           return;
         }
-        const value = await queryUsageStatus(ctx.credentials, baselinePath);
+        const value = await queryUsageStatus(ctx, baselinePath, ledger);
         cache.set("status", { at: Date.now(), value });
         sendJson(res, 200, value);
       }
@@ -261,6 +331,7 @@ export function apply(ctx) {
     return () => {
       disposeRoute();
       cache.clear();
+      ledger.dispose();
     };
   }, "usage-status: /usage-status route");
 }

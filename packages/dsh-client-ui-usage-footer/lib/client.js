@@ -195,6 +195,7 @@ window.__ModuleLoader__.load({
 			const hoverTimer = react.useRef(null);
 			const leaveTimer = react.useRef(null);
 			const rootRef = react.useRef(null);
+			const panelRef = react.useRef(null);
 			const refresh = react.useCallback(async () => {
 				try {
 					const response = await fetch("/usage-status", { headers: { accept: "application/json" } });
@@ -280,6 +281,7 @@ window.__ModuleLoader__.load({
 				if (!pinned) return;
 				const onPointerDown = (event) => {
 					if (rootRef.current !== null && rootRef.current.contains(event.target)) return;
+					if (panelRef.current !== null && panelRef.current.contains(event.target)) return;
 					setPinned(false);
 					setOpen(false);
 				};
@@ -327,6 +329,7 @@ window.__ModuleLoader__.load({
 				{ key: "output", tint: "uW_tintOutput", label: t("panel.output"), value: usage.outputTokens }
 			] : [];
 			const panel = jsx("div", {
+				ref: panelRef,
 				className: "uW_panel",
 				"data-open": open ? "true" : "false",
 				role: "dialog",

@@ -17,14 +17,18 @@ DSH Web 界面「用量与费用」插件（独立项目），包含两个包：
   - **账户余额**：官方 API `GET https://api.deepseek.com/user/balance`（每 60 秒刷新，点击"更新"手动刷新），含充值/赠送拆分
   - **峰谷时段**：按北京时间实时判定高峰/空闲，显示当前时刻与下次切换时间，并附 24 小时峰谷条（高峰 9:00-12:00 / 14:00-18:00，当前小时高亮）
   - **本会话用量**：累计 token + 输入（未缓存）/缓存命中/缓存写入/输出 四项分条
-  - **今日消费（余额差值，官方口径）**：当天首次查询时把余额快照写入 `$DSH_HOME/usage-footer-balance-baseline.json`，之后每次查询用「当日快照 − 当前余额」算出今日真实消费（已对充值/赠送做修正运算，日切自动重锚）；余额结算有延迟，且不含当日首次查询前产生的消耗
+  - **本地账本（官方价）**：宿主侧订阅 DSH `session/event`，对每条带 usage 的 `assistant/message` 按 DeepSeek 官方价格时间表计价（含 2026-08-17 起峰谷定价），持久化到 `$DSH_HOME/storages/usage-footer-ledger.json`，展示今日/本月 token 与金额；这是后续无法登录官网时的主要消耗依据
+  - **官方对比**（可选）：配置 `DEEPSEEK_PLATFORM_TOKEN` 后，插件拉取 platform.deepseek.com 私有用量接口，和本地账本并排显示“本地 vs 官方”的差异，方便你现在校准
+  - **今日消费（余额差值估算）**：当天首次查询时把余额快照写入 `$DSH_HOME/usage-footer-balance-baseline.json`，之后用「当日快照 − 当前余额」估算；注意充值/赠送会干扰该估算，余额结算也有延迟，**仅作兜底**
   - **本机今日用量（token 统计）**：按会话去重累计本机今日产生的 token，显示 token 数与按峰谷价目估算的金额（空闲/高峰两档），日切自动清零，存于浏览器 localStorage（`dsh-usage-footer.today.v1`）；这是本机观测统计，**非官方账单**
   - **消费估算（本会话）**：token 数 × DeepSeek 峰谷定价（2026-08-17 起，deepseek-v4-pro），空闲/高峰两档并排
-  - **本月账户用量**（可选）：配置 `DEEPSEEK_PLATFORM_TOKEN` 后显示
+  - **本月用量/费用**：优先显示官方平台汇总（配置 token 时），否则显示本地账本汇总
 - **自助开关**：设置 → 通用 → 「用量与费用栏」开启/关闭，实时生效；关闭后停止轮询、服务端路由拒绝查询
 - 视觉：毛玻璃面板（backdrop-blur + 半透明菜单底色）、表格数字（tabular-nums）、细线分隔、入场位移+缩放动画，全部使用宿主 `--dsw-*` 设计令牌，自动适配明暗主题
 
-> 说明：账户级"今日/本月用量与消费"的官方数据源（platform.deepseek.com 私有接口）需要浏览器登录态 `userToken`，配置 `DEEPSEEK_PLATFORM_TOKEN` 后可用；未配置时"今日消费"来自余额差值快照、"本机今日用量"为本机观测估算。
+> 说明：账户级"今日/本月用量与消费"的官方数据源（platform.deepseek.com 私有接口）需要浏览器登录态 `userToken`，配置 `DEEPSEEK_PLATFORM_TOKEN` 后可用；未配置时精确金额以本地账本为准，"今日消费（余额差值）"只是兜底估算。
+
+> 如何验证与官网对齐：现在还能登录官网时，把 `DEEPSEEK_PLATFORM_TOKEN` 配到凭证里，打开悬浮面板查看「本地 vs 官方」差异。若本地账本与官方基本一致，之后无法登录时就可以依赖本地账本。注意：本地账本从插件安装/重启后开始记录，不会追溯安装前的历史消耗。
 
 ## 安装方法（任意机器通用）
 
@@ -32,7 +36,7 @@ DSH Web 界面「用量与费用」插件（独立项目），包含两个包：
 
 - 已安装并运行 `dsh web`（DeepSeek Harness 的 Web 界面）
 - 凭证中已配置 `DEEPSEEK_API_KEY`（写入 `$DSH_HOME/.credentials.yaml` 或环境变量，格式 `DEEPSEEK_API_KEY: sk-...`）
-- 可选：`DEEPSEEK_PLATFORM_TOKEN`（platform.deepseek.com 浏览器登录态的 `userToken`），用于显示本月账户用量
+- 可选：`DEEPSEEK_PLATFORM_TOKEN`（platform.deepseek.com 浏览器登录态的 `userToken`），用于显示官方本月/今日用量并与本地账本对比校准
 - 宿主插件依赖 `@deepseek-ai/schemastery`：在本仓库根目录执行一次 `pnpm install`（或把本机 DSH 模块目录 junction 到本仓库的 `node_modules/`）
 
 ### 2. 把两个包放进 DSH 的模块目录
@@ -74,7 +78,8 @@ macOS/Linux 同理，用 `ln -s` 链接到 `~/.dsh/profiles/node_modules/` 下�
 ## 本地检查
 
 ```powershell
-pnpm run check        # 语法检查两个入口文件
+pnpm run check        # 语法检查入口与新增模块
+pnpm test             # 运行余额/定价/账本/平台解析单元测试
 ```
 
 ## 设置持久化

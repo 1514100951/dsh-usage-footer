@@ -302,8 +302,18 @@ window.__ModuleLoader__.load({
 			const todaySpend = status !== null && status.todaySpend !== null && typeof status.todaySpend?.amount === "number"
 				? status.todaySpend
 				: null;
-			const monthTokens = status !== null ? findNumber(status.usageAmount, /token/i) ?? findNumber(status.usageAmount, /amount|total/i) : undefined;
-			const monthCost = status !== null ? findNumber(status.usageCost, /cost|spend|consumption|amount/i) : undefined;
+			const local = status?.local ?? null;
+			const official = status?.official ?? null;
+			const comparison = status?.comparison ?? null;
+			const localMonth = local?.month ?? null;
+			const localToday = local?.today ?? null;
+			const localMonthTokens = localMonth ? localMonth.inputTokens + localMonth.cacheReadTokens + localMonth.cacheWriteTokens + localMonth.outputTokens : 0;
+			const localTodayTokens = localToday ? localToday.inputTokens + localToday.cacheReadTokens + localToday.cacheWriteTokens + localToday.outputTokens : 0;
+			const localMonthCost = localMonth?.cost ?? null;
+			const localTodayCost = localToday?.cost ?? null;
+			// 优先展示官方汇总；未配置平台 token 时展示本地账本汇总。
+			const monthTokens = official?.monthTokens ?? (localMonthTokens > 0 ? localMonthTokens : undefined);
+			const monthCost = official?.monthCost ?? (localMonthCost != null ? localMonthCost : undefined);
 			const buckets = usage !== undefined && total > 0 ? [
 				{ key: "uncached", tint: "uW_tintUncached", label: t("panel.inputUncached"), value: usage.uncachedInputTokens },
 				{ key: "cacheRead", tint: "uW_tintCacheRead", label: t("panel.cacheRead"), value: usage.cacheReadTokens },
@@ -392,6 +402,38 @@ window.__ModuleLoader__.load({
 							] })
 						] }),
 						jsx("div", { className: "uW_costNote", children: t("panel.costNote") })
+					] }),
+					(local !== null && (localTodayCost != null || localMonthCost != null)) && jsxs(Fragment, { children: [
+						jsx("div", { className: "uW_sectionLabel", children: t("panel.localLedger") }),
+						localTodayCost != null && jsxs("div", { className: "uW_localCell", children: [
+							jsxs("div", { className: "uW_localHead", children: [
+								jsx("span", { className: "uW_localLabel", children: t("panel.localLedgerToday") }),
+								jsx("span", { className: "uW_localTokens", children: t("panel.localTokens", { total: formatTokens(localTodayTokens) }) })
+							] }),
+							jsx("div", { className: "uW_localCost", children: t("panel.localCost", { amount: moneyText(formatMoney(localTodayCost), "CNY") }) })
+						] }),
+						localMonthCost != null && jsxs("div", { className: "uW_localCell", children: [
+							jsxs("div", { className: "uW_localHead", children: [
+								jsx("span", { className: "uW_localLabel", children: t("panel.localLedgerMonth") }),
+								jsx("span", { className: "uW_localTokens", children: t("panel.localTokens", { total: formatTokens(localMonthTokens) }) })
+							] }),
+							jsx("div", { className: "uW_localCost", children: t("panel.localCost", { amount: moneyText(formatMoney(localMonthCost), "CNY") }) })
+						] })
+					] }),
+					comparison !== null && jsxs(Fragment, { children: [
+						jsx("div", { className: "uW_sectionLabel", children: t("panel.compare") }),
+						jsx("div", { className: "uW_localCell", title: t("panel.compareNote"), children: [
+							jsx("div", { className: "uW_localCost", children: t("panel.compareMonth", {
+								local: moneyText(formatMoney(comparison.month.localCost), comparison.month.currency),
+								official: moneyText(formatMoney(comparison.month.officialCost), comparison.month.currency),
+								diff: moneyText(formatMoney(comparison.month.diff), comparison.month.currency)
+							}) }),
+							jsx("div", { className: "uW_localCost", children: t("panel.compareToday", {
+								local: moneyText(formatMoney(comparison.today.localCost), comparison.today.currency),
+								official: moneyText(formatMoney(comparison.today.officialCost), comparison.today.currency),
+								diff: moneyText(formatMoney(comparison.today.diff), comparison.today.currency)
+							}) })
+						] })
 					] }),
 					(monthTokens !== undefined || monthCost !== undefined) && jsxs(Fragment, { children: [
 						jsx("div", { className: "uW_sectionLabel", children: t("panel.month") }),
@@ -506,9 +548,9 @@ window.__ModuleLoader__.load({
 			"panel.cacheWrite": "缓存写入",
 			"panel.output": "输出",
 			"panel.cost": "消费估算",
-			"panel.todaySpend": "今日消费（余额差值）",
-			"panel.todaySpendSince": "自 {time} 起 · 已计入充值/赠送调整",
-			"panel.todaySpendNote": "官方口径：今日首次查询时的余额快照与当前余额之差；余额结算有延迟，且不含今日首次查询前产生的消耗",
+			"panel.todaySpend": "今日消费（余额估算）",
+			"panel.todaySpendSince": "自 {time} 起 · 余额差值估算",
+			"panel.todaySpendNote": "估算值：今日首次查询时的余额快照与当前余额之差；余额结算有延迟，且不含今日首次查询前产生的消耗。精确金额请以本地账本/官方数据为准",
 			"panel.todayLocal": "本机今日用量（token 统计）",
 			"panel.todayTokens": "{total} token",
 			"panel.todayCost": "空闲 ≈ ¥{off} · 高峰 ¥{peak}",
@@ -516,7 +558,16 @@ window.__ModuleLoader__.load({
 			"panel.costOff": "本会话 · 空闲",
 			"panel.costPeak": "本会话 · 高峰",
 			"panel.costNote": "按 deepseek-v4-pro 峰谷价目估算（2026-08-17 起）",
-			"panel.month": "本月账户用量",
+			"panel.localLedger": "本地账本（官方价）",
+			"panel.localLedgerToday": "今日",
+			"panel.localLedgerMonth": "本月",
+			"panel.localTokens": "{total} token",
+			"panel.localCost": "{amount}",
+			"panel.compare": "本地 vs 官方",
+			"panel.compareMonth": "本月：本地 {local} · 官方 {official} · 差 {diff}",
+			"panel.compareToday": "今日：本地 {local} · 官方 {official} · 差 {diff}",
+			"panel.compareNote": "配置 DEEPSEEK_PLATFORM_TOKEN 后显示官方对比；差值为本地估算与官方账单的偏差",
+			"panel.month": "本月用量/费用",
 			"panel.updated": "{time} 更新 · 点击刷新",
 			"panel.loading": "查询中…",
 			"panel.hint": "设置 → 通用 可关闭",
@@ -541,9 +592,9 @@ window.__ModuleLoader__.load({
 			"panel.cacheWrite": "Cache write",
 			"panel.output": "Output",
 			"panel.cost": "Estimated cost",
-			"panel.todaySpend": "Today's spend (balance delta)",
-			"panel.todaySpendSince": "Since {time} · recharges/grants adjusted",
-			"panel.todaySpendNote": "Official口径: difference between the day-start balance snapshot and the current balance; billing may lag, and usage before today's first query is not included",
+			"panel.todaySpend": "Today's spend (balance estimate)",
+			"panel.todaySpendSince": "Since {time} · balance-delta estimate",
+			"panel.todaySpendNote": "Estimate: day-start balance snapshot minus current balance; billing may lag, and usage before today's first query is not included. For precise figures use the local ledger / official data",
 			"panel.todayLocal": "Today's usage (local tokens)",
 			"panel.todayTokens": "{total} tokens",
 			"panel.todayCost": "Off-peak ≈ ¥{off} · Peak ¥{peak}",
@@ -551,7 +602,16 @@ window.__ModuleLoader__.load({
 			"panel.costOff": "This session · off-peak",
 			"panel.costPeak": "This session · peak",
 			"panel.costNote": "Estimated from deepseek-v4-pro peak/off-peak pricing (since 2026-08-17)",
-			"panel.month": "This month",
+			"panel.localLedger": "Local ledger (official prices)",
+			"panel.localLedgerToday": "Today",
+			"panel.localLedgerMonth": "Month",
+			"panel.localTokens": "{total} tokens",
+			"panel.localCost": "{amount}",
+			"panel.compare": "Local vs Official",
+			"panel.compareMonth": "Month: local {local} · official {official} · diff {diff}",
+			"panel.compareToday": "Today: local {local} · official {official} · diff {diff}",
+			"panel.compareNote": "Official comparison appears when DEEPSEEK_PLATFORM_TOKEN is configured; diff is local estimate vs official bill",
+			"panel.month": "This month usage/cost",
 			"panel.updated": "Updated {time} · click to refresh",
 			"panel.loading": "Loading…",
 			"panel.hint": "Toggle in Settings → General",

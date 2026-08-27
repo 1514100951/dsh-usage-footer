@@ -58,7 +58,7 @@
   ],
   "scripts": {
     "check": "node --check lib/client.js && node --check lib/pricing.js && node --check lib/ledger.js && node --check lib/platform.js && node --input-type=module -e \"import('./lib/index.js').then(() => console.log('host module ok'))\"",
-    "test": "node test/baseline.test.mjs && node test/pricing.test.mjs && node test/ledger.test.mjs && node test/platform.test.mjs"
+    "test": "node test/baseline.test.mjs && node test/pricing.test.mjs && node test/ledger.test.mjs && node test/platform.test.mjs && node test/sync.test.mjs"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1"

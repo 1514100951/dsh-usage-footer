@@ -1,87 +1,90 @@
 # dsh-usage-footer
 
-DSH Web 界面「用量与费用」插件（独立项目），包含两个包：
+DSH Web 界面「用量与费用」插件：页面右下角一枚悬浮金币按钮，悬停/点击弹出用量面板
+（账户余额、峰谷时段、本会话 token 与消费估算、今日消费、本月账户用量），并在
+**设置 → 通用** 提供「用量与费用栏」开关。
 
-| 包 | 角色 | 入口 |
-|---|---|---|
-| `dsh-usage-status` | 宿主插件：注册 `GET /usage-status` 路由（查询 DeepSeek 余额 API），并注册 `usage-footer` 设置命名空间作为开关门控 | `lib/index.js` |
-| `dsh-client-ui-usage-footer` | 浏览器插件：在页面右下角渲染一枚悬浮金币按钮，悬停/点击弹出用量面板；并在 **设置 → 通用** 增加「用量与费用栏」开关 | `lib/client.js`（自包含 bundle） |
+这是**标准 DSH Bundle**：一个包同时提供宿主半（`GET /usage-status` 路由 + 设置命名
+空间）与浏览器半（自包含 web bundle），通过 `dsh.bundle.patch` 注册唯一入口
+`dsh-usage-footer`，浏览器半经 `dsh.client` 自动进入 web 插件表。
 
 ## 功能
 
-<img width="486" height="725" alt="84b8dcee67b5baaabca23bc1b62f87bf" src="https://github.com/user-attachments/assets/cec5e700-4afd-4d91-b42d-c1826e5f46cb" />
-
-
-- **悬浮按钮（右下角）**：悬浮圆钮（金币徽标），外环与角点颜色指示当前时段——绿=空闲、琥珀=高峰（呼吸动画）、红=余额查询失败
-- **悬停弹窗**（120ms 延迟出现、260ms 宽容关闭；点击可钉住，点外部/Esc 关闭；自按钮左上方展开）：
-  - **账户余额**：官方 API `GET https://api.deepseek.com/user/balance`（每 60 秒刷新，点击"更新"手动刷新），含充值/赠送拆分
-  - **峰谷时段**：按北京时间实时判定高峰/空闲，显示当前时刻与下次切换时间，并附 24 小时峰谷条（高峰 9:00-12:00 / 14:00-18:00，当前小时高亮）
+- **悬浮按钮（右下角）**：金币徽标圆钮，外环与角点颜色指示当前时段——绿=空闲、
+  琥珀=高峰（呼吸动画）、红=余额查询失败
+- **悬停弹窗**（120ms 延迟出现、260ms 宽容关闭；点击可钉住，点外部/Esc 关闭）：
+  - **账户余额**：官方 API `GET https://api.deepseek.com/user/balance`（每 60 秒刷新），
+    含充值/赠送拆分
+  - **峰谷时段**：按北京时间实时判定，附 24 小时峰谷条（高峰 9:00-12:00 / 14:00-18:00）
   - **本会话用量**：累计 token + 输入（未缓存）/缓存命中/缓存写入/输出 四项分条
-  - **今日消费（余额差值，官方口径）**：当天首次查询时把余额快照写入 `$DSH_HOME/usage-footer-balance-baseline.json`，之后每次查询用「当日快照 − 当前余额」算出今日真实消费（已对充值/赠送做修正运算，日切自动重锚）；余额结算有延迟，且不含当日首次查询前产生的消耗
-  - **本机今日用量（token 统计）**：按会话去重累计本机今日产生的 token，显示 token 数与按峰谷价目估算的金额（空闲/高峰两档），日切自动清零，存于浏览器 localStorage（`dsh-usage-footer.today.v1`）；这是本机观测统计，**非官方账单**
-  - **消费估算（本会话）**：token 数 × DeepSeek 峰谷定价（2026-08-17 起，deepseek-v4-pro），空闲/高峰两档并排
+  - **今日消费（余额差值，官方口径）**：当日首次查询时把余额快照写入
+    `$DSH_HOME/usage-footer-balance-baseline.json`，此后用「当日快照 − 当前余额」计算
+    今日真实消费（已对充值/赠送修正，日切自动重锚）
+  - **本机今日用量（token 统计）**：按会话去重累计本机今日 token 与峰谷价目估算，
+    日切清零，存于 localStorage（`dsh-usage-footer.today.v1`）；**非官方账单**
+  - **消费估算（本会话）**：token × DeepSeek 峰谷定价（deepseek-v4-pro），空闲/高峰两档
   - **本月账户用量**（可选）：配置 `DEEPSEEK_PLATFORM_TOKEN` 后显示
-- **自助开关**：设置 → 通用 → 「用量与费用栏」开启/关闭，实时生效；关闭后停止轮询、服务端路由拒绝查询
-- 视觉：毛玻璃面板（backdrop-blur + 半透明菜单底色）、表格数字（tabular-nums）、细线分隔、入场位移+缩放动画，全部使用宿主 `--dsw-*` 设计令牌，自动适配明暗主题
+- **自助开关**：设置 → 通用 → 「用量与费用栏」，实时生效；关闭后停止轮询、宿主路由
+  返回 `{ disabled: true }`
+- 视觉：毛玻璃面板、表格数字（tabular-nums）、入场位移+缩放动画，全部使用宿主
+  `--dsw-*` 设计令牌，自动适配明暗主题
 
-> 说明：账户级"今日/本月用量与消费"的官方数据源（platform.deepseek.com 私有接口）需要浏览器登录态 `userToken`，配置 `DEEPSEEK_PLATFORM_TOKEN` 后可用；未配置时"今日消费"来自余额差值快照、"本机今日用量"为本机观测估算。
+## 兼容性声明（package.json）
+
+| 范围 | 声明 |
+|---|---|
+| DSH 版本（范围） | `>=0.1.0-rc.8 <0.2.0` |
+| DSH 版本（逐版本） | `0.1.0-rc.8` / `0.1.1-rc.1` / `0.1.1-rc.2` → `compatible` |
+| Node.js | `>=20 <27` |
+
+一次性 Profile 的安装/启动/卸载证据见 [`docs/EVIDENCE.md`](docs/EVIDENCE.md)
+（在 DSH `0.1.1-rc.2` 上实际执行通过）。
 
 ## 安装方法（任意机器通用）
 
-### 1. 前置条件
-
-- 已安装并运行 `dsh web`（DeepSeek Harness 的 Web 界面）
-- 凭证中已配置 `DEEPSEEK_API_KEY`（写入 `$DSH_HOME/.credentials.yaml` 或环境变量，格式 `DEEPSEEK_API_KEY: sk-...`）
-- 可选：`DEEPSEEK_PLATFORM_TOKEN`（platform.deepseek.com 浏览器登录态的 `userToken`），用于显示本月账户用量
-- 宿主插件依赖 `@deepseek-ai/schemastery`：在本仓库根目录执行一次 `pnpm install`（或把本机 DSH 模块目录 junction 到本仓库的 `node_modules/`）
-
-### 2. 把两个包放进 DSH 的模块目录
-
-DSH 的宿主 Loader 与浏览器模块扫描器都按**包名**从 `$DSH_HOME/profiles/node_modules`（模块回退目录）解析插件。将本仓库的两个包目录**链接或复制**到该目录下：
-
-- `dsh-usage-status` → `$DSH_HOME/profiles/node_modules/dsh-usage-status`
-- `dsh-client-ui-usage-footer` → `$DSH_HOME/profiles/node_modules/dsh-client-ui-usage-footer`
-
-Windows 上建议用 junction，之后改本仓库代码即生效：
+### 方式一：dsh plugin 命令
 
 ```powershell
-New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\dsh-usage-status"           -Target "<本仓库路径>\packages\dsh-usage-status"
-New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\node_modules\dsh-client-ui-usage-footer" -Target "<本仓库路径>\packages\dsh-client-ui-usage-footer"
+dsh plugin --profile web add github:1514100951/dsh-usage-footer
+# 新增依赖/层需要重启进程
+dsh web
 ```
 
-macOS/Linux 同理，用 `ln -s` 链接到 `~/.dsh/profiles/node_modules/` 下；直接复制目录也可以。
+### 方式二：手动安装（等价步骤）
 
-### 3. 在 Web profile 的组合里注册两行
+1. 把本仓库（`package.json`、`lib/`、`cordis.patch.yml`）放入
+   `$DSH_HOME/profiles/node_modules/dsh-usage-footer/`
+2. 把 `dsh-usage-footer` 加入 `$DSH_HOME/profiles/web/package.json` 的
+   `dsh.profile.bundles` 列表
+3. 重启 `dsh web`（新增 bundle 层需要重启；随后刷新浏览器页面即可看到悬浮按钮）
 
-编辑你的 web profile 补丁文件 `$DSH_HOME/profiles/web/cordis.patch.yml`，追加：
+> 卸载 = 从 `bundles` 列表移除包名并删除模块目录，详见 `docs/EVIDENCE.md` 第 3 节。
 
-```yaml
-- insert:
-    - id: usage-status
-      name: dsh-usage-status
+## 前置条件与外部依赖
 
-    - id: ui-usage-footer
-      name: dsh-client-ui-usage-footer
-```
+- 运行 `dsh web`（DeepSeek Harness Web 界面）
+- 凭证中配置 `DEEPSEEK_API_KEY`（`$DSH_HOME/.credentials.yaml` 或环境变量）后，
+  余额接口才有数据；可选 `DEEPSEEK_PLATFORM_TOKEN`（platform.deepseek.com 登录态
+  `userToken`）用于本月账户用量
+- 运行时依赖：`@deepseek-ai/schemastery`（宿主半的 settings schema）；peer 依赖
+  `@deepseek-ai/cordis`、`@deepseek-ai/dsh-client-runtime`、`react`
 
-该文件被运行中的 `dsh web` 热监听，保存后宿主行自动挂载；随后**刷新浏览器页面**即可看到悬浮按钮。想完全卸载时，把这两行置 `disabled: true`。
+## 权限与安全
 
-## 修改后如何生效
-
-- **客户端 bundle（UI）**：改 `packages/dsh-client-ui-usage-footer/lib/client.js` 后，**刷新浏览器页面**即可（bundle 按请求实时读取、no-cache）。
-- **宿主插件（API 路由 / 设置注册）**：改 `packages/dsh-usage-status/lib/index.js` 后，**重启 `dsh web`**（宿主模块按进程缓存，无热重载）。
+- 不替换、不遮蔽、不禁用任何 `@deepseek-ai/*` 官方组件；Bundle Patch 仅新增插件
+  自有入口 ID `dsh-usage-footer`
+- 无 `preinstall/install/postinstall/prepare` 生命周期脚本
+- 代码不含密钥；API Key 始终经 DSH 凭证服务在宿主侧解析
+- `GET /usage-status` 仅绑定 127.0.0.1 且路由内校验回环，局域网访问 403
+- 网络访问：仅 `api.deepseek.com` 与（可选）`platform.deepseek.com`
 
 ## 本地检查
 
 ```powershell
-pnpm run check        # 语法检查两个入口文件
+npm run check   # 语法检查宿主/浏览器两半
+npm test        # 余额快照日切/充值修正的基线测试
 ```
 
-## 设置持久化
+## License
 
-开关状态写入两处并保持一致：浏览器 `localStorage`（`dsh-usage-footer.enabled`，无需重启即可用）与宿主设置文档（重启一次 `dsh web` 后生效，存于 `settings.yaml` 的 `usage-footer` 段）。
-
-## 安全说明
-
-- 本项目代码不含任何密钥；API Key 始终通过 DSH 凭证服务在宿主侧解析
-- `GET /usage-status` 路由仅接受本机回环（loopback）请求，局域网访问返回 403
+[MIT](LICENSE)

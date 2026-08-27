@@ -1,5 +1,5 @@
 // Unit test for the balance-snapshot math in dsh-usage-status.
-import { computeTodaySpend } from "../packages/dsh-usage-status/lib/index.js";
+import { computeTodaySpend } from "../lib/index.js";
 import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

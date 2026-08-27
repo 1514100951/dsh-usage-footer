@@ -1,0 +1,9 @@
+# dsh-usage-footer — bundle patch layer.
+# One additive insert under a plugin-owned entry ID: mounts the Host half
+# (lib/index.js), which serves GET /usage-status and registers the
+# usage-footer settings namespace. The Client half needs no patch row:
+# dsh.client packages join the web plugin table automatically (see
+# package.json `dsh.client`).
+- insert:
+    - id: dsh-usage-footer
+      name: dsh-usage-footer

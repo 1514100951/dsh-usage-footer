@@ -17,17 +17,24 @@ DSH Web 界面「用量与费用」插件：页面右下角一枚悬浮金币按
     含充值/赠送拆分
   - **峰谷时段**：按北京时间实时判定，附 24 小时峰谷条（高峰 9:00-12:00 / 14:00-18:00）
   - **本会话用量**：累计 token + 输入（未缓存）/缓存命中/缓存写入/输出 四项分条
-  - **今日消费（余额差值，官方口径）**：当日首次查询时把余额快照写入
-    `$DSH_HOME/usage-footer-balance-baseline.json`，此后用「当日快照 − 当前余额」计算
-    今日真实消费（已对充值/赠送修正，日切自动重锚）
+  - **本地账本（官方价）**：宿主侧订阅 DSH `session/event`，按 DeepSeek 官方价格时间表
+    记录今日/本月 token 与金额，持久化到 `$DSH_HOME/storages/usage-footer-ledger.json`
+  - **官方对比**（可选）：配置 `DEEPSEEK_PLATFORM_TOKEN` 后并排显示本地账本与
+    platform.deepseek.com 官方汇总，便于校准差异
+  - **今日消费（余额差值估算）**：当日首次查询时把余额快照写入
+    `$DSH_HOME/usage-footer-balance-baseline.json`，此后用「当日快照 − 当前余额」估算；
+    充值、赠送和余额结算延迟会干扰结果，**仅作兜底**
   - **本机今日用量（token 统计）**：按会话去重累计本机今日 token 与峰谷价目估算，
     日切清零，存于 localStorage（`dsh-usage-footer.today.v1`）；**非官方账单**
   - **消费估算（本会话）**：token × DeepSeek 峰谷定价（deepseek-v4-pro），空闲/高峰两档
-  - **本月账户用量**（可选）：配置 `DEEPSEEK_PLATFORM_TOKEN` 后显示
+  - **本月用量/费用**：优先显示官方平台汇总，否则显示本地账本汇总
 - **自助开关**：设置 → 通用 → 「用量与费用栏」，实时生效；关闭后停止轮询、宿主路由
   返回 `{ disabled: true }`
 - 视觉：毛玻璃面板、表格数字（tabular-nums）、入场位移+缩放动画，全部使用宿主
   `--dsw-*` 设计令牌，自动适配明暗主题
+
+> 本地账本只记录插件启用后的用量，不追溯历史；官方数据需要浏览器登录态
+> `userToken`。未配置平台 token 时，精确金额以本地账本为准，余额差值只作兜底估算。
 
 ## 兼容性声明（package.json）
 
@@ -82,7 +89,7 @@ dsh web
 
 ```powershell
 npm run check   # 语法检查宿主/浏览器两半
-npm test        # 余额快照日切/充值修正的基线测试
+npm test        # 运行余额、定价、账本与平台解析测试
 ```
 
 ## License
